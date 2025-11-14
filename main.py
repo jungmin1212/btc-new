@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import warnings
 import requests
 import os
+import time
 warnings.filterwarnings('ignore')
 
 
@@ -16,7 +17,13 @@ class BTCReport:
     
     def __init__(self):
         self.symbol = 'BTC/USDT'
-        self.exchange = ccxt.binance({'enableRateLimit': True})
+        self.exchange = ccxt.binance({
+            'enableRateLimit': True,
+            'timeout': 30000,
+            'options': {
+                'defaultType': 'spot'
+            }
+        })
         self.data = {}
         self.report = []
         
@@ -30,7 +37,7 @@ class BTCReport:
         print(text)
     
     
-    def fetch_data(self, timeframe, days):
+    def fetch_data(self, timeframe, days, max_retries=3):
         """데이터 수집"""
         print(f"수집 중: {timeframe} ({days}일)...", end=" ")
         
@@ -39,17 +46,37 @@ class BTCReport:
         )
         
         all_data = []
-        while True:
+        retry_count = 0
+        
+        while retry_count < max_retries:
             try:
                 ohlcv = self.exchange.fetch_ohlcv(self.symbol, timeframe, since, limit=1000)
+                
                 if not ohlcv:
-                    break
+                    print(f"데이터 없음 (시도 {retry_count + 1}/{max_retries})")
+                    retry_count += 1
+                    time.sleep(2)
+                    continue
+                
                 all_data.extend(ohlcv)
                 since = ohlcv[-1][0] + 1
+                
                 if since >= self.exchange.milliseconds():
                     break
-            except:
-                break
+                    
+            except Exception as e:
+                print(f"오류: {e} (시도 {retry_count + 1}/{max_retries})")
+                retry_count += 1
+                time.sleep(2)
+                
+                if retry_count >= max_retries:
+                    print("최대 재시도 초과")
+                    break
+                continue
+        
+        if not all_data:
+            print("실패 - 데이터 없음")
+            return pd.DataFrame()
         
         df = pd.DataFrame(all_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -61,6 +88,9 @@ class BTCReport:
     
     def calc_indicators(self, df):
         """지표 계산"""
+        if df.empty:
+            return df
+            
         df['MA7'] = df['close'].rolling(7).mean()
         df['MA20'] = df['close'].rolling(20).mean()
         df['MA50'] = df['close'].rolling(50).mean()
@@ -90,14 +120,25 @@ class BTCReport:
         """분석"""
         # 데이터 수집
         self.data['1h'] = self.fetch_data('1h', 180)
+        
+        if self.data['1h'].empty:
+            print("\n데이터 수집 실패 - 프로그램 종료")
+            self.log("❌ 데이터 수집 실패")
+            return False
+        
         self.data['4h'] = self.fetch_data('4h', 180)
         self.data['1d'] = self.fetch_data('1d', 1095)
         
         # 지표 계산
         for tf in ['1h', '4h', '1d']:
-            self.data[tf] = self.calc_indicators(self.data[tf])
+            if not self.data[tf].empty:
+                self.data[tf] = self.calc_indicators(self.data[tf])
         
         # 현재가
+        if len(self.data['1h']) < 24:
+            print("데이터 부족")
+            return False
+            
         current = self.data['1h']['close'].iloc[-1]
         prev_1h = self.data['1h']['close'].iloc[-2]
         prev_24h = self.data['1h']['close'].iloc[-24]
@@ -116,7 +157,14 @@ class BTCReport:
         # 각 타임프레임 분석
         scores = []
         for tf_name, tf_data in [('1시간', '1h'), ('4시간', '4h'), ('일봉', '1d')]:
+            if self.data[tf_data].empty:
+                continue
+                
             df = self.data[tf_data].dropna()
+            
+            if len(df) < 50:
+                continue
+                
             latest = df.iloc[-1]
             
             close = latest['close']
@@ -155,6 +203,10 @@ class BTCReport:
             self.log(f"  MACD: {'골든크로스' if macd > macd_sig else '데드크로스'}")
             self.log()
         
+        if not scores:
+            self.log("분석 데이터 부족")
+            return False
+        
         # 종합 의견
         avg_score = sum(scores) / len(scores)
         
@@ -177,17 +229,24 @@ class BTCReport:
         self.log()
         
         # RSI 종합
-        avg_rsi = sum([self.data[tf].dropna().iloc[-1]['RSI'] for tf in ['1h', '4h', '1d']]) / 3
+        rsi_values = []
+        for tf in ['1h', '4h', '1d']:
+            if not self.data[tf].empty and len(self.data[tf].dropna()) > 0:
+                rsi_values.append(self.data[tf].dropna().iloc[-1]['RSI'])
         
-        if avg_rsi > 70:
-            self.log(f"⚠️  과매수 구간 (RSI {avg_rsi:.0f}) - 조정 위험")
-        elif avg_rsi < 30:
-            self.log(f"✨ 과매도 구간 (RSI {avg_rsi:.0f}) - 반등 기회")
-        else:
-            self.log(f"📊 RSI {avg_rsi:.0f} - 정상 구간")
+        if rsi_values:
+            avg_rsi = sum(rsi_values) / len(rsi_values)
+            
+            if avg_rsi > 70:
+                self.log(f"⚠️  과매수 구간 (RSI {avg_rsi:.0f}) - 조정 위험")
+            elif avg_rsi < 30:
+                self.log(f"✨ 과매도 구간 (RSI {avg_rsi:.0f}) - 반등 기회")
+            else:
+                self.log(f"📊 RSI {avg_rsi:.0f} - 정상 구간")
         
         self.log()
         self.log("=" * 70)
+        return True
     
     
     def send_telegram(self):
@@ -214,9 +273,15 @@ class BTCReport:
     def run(self):
         """실행"""
         print("\n비트코인 리포트 생성 시작\n")
-        self.analyze()
-        self.send_telegram()
-        print("\n완료")
+        success = self.analyze()
+        
+        if success:
+            self.send_telegram()
+            print("\n완료")
+        else:
+            print("\n실패 - 분석 불가")
+            if self.report:
+                self.send_telegram()
 
 
 if __name__ == "__main__":
