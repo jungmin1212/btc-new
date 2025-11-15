@@ -1,15 +1,15 @@
 """
 비트코인 시황 리포트 - 텔레그램 전송
-CoinGecko API 사용 (GitHub Actions 호환)
+yfinance 사용 (Yahoo Finance - 가장 안정적)
 """
 
+import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import warnings
 import requests
 import os
-import time
 warnings.filterwarnings('ignore')
 
 
@@ -29,51 +29,27 @@ class BTCReport:
         print(text)
     
     
-    def fetch_coingecko_data(self, days, max_retries=3):
-        """CoinGecko API로 데이터 수집"""
-        print(f"수집 중: {days}일 데이터...", end=" ")
+    def fetch_data(self, period='90d', interval='1h'):
+        """yfinance로 데이터 수집"""
+        print(f"수집 중: {interval} ({period})...", end=" ")
         
-        url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-        params = {
-            'vs_currency': 'usd',
-            'days': days,
-            'interval': 'hourly' if days <= 90 else 'daily'
-        }
-        
-        for attempt in range(max_retries):
-            try:
-                response = requests.get(url, params=params, timeout=30)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    
-                    # 데이터 변환
-                    prices = data['prices']
-                    volumes = data['total_volumes']
-                    
-                    df = pd.DataFrame(prices, columns=['timestamp', 'close'])
-                    df['volume'] = [v[1] for v in volumes]
-                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                    df.set_index('timestamp', inplace=True)
-                    
-                    # OHLC 근사치 (1시간/1일 단위)
-                    df['open'] = df['close'].shift(1)
-                    df['high'] = df[['open', 'close']].max(axis=1)
-                    df['low'] = df[['open', 'close']].min(axis=1)
-                    df = df.dropna()
-                    
-                    print(f"완료 ({len(df)}개)")
-                    return df
-                else:
-                    print(f"오류 {response.status_code} (시도 {attempt + 1}/{max_retries})")
-                    time.sleep(2)
-                    
-            except Exception as e:
-                print(f"오류: {e} (시도 {attempt + 1}/{max_retries})")
-                time.sleep(2)
-        
-        print("실패")
-        return pd.DataFrame()
+        try:
+            btc = yf.Ticker("BTC-USD")
+            df = btc.history(period=period, interval=interval)
+            
+            if df.empty:
+                print("실패 - 데이터 없음")
+                return pd.DataFrame()
+            
+            # 컬럼명 소문자로 변경
+            df.columns = [c.lower() for c in df.columns]
+            
+            print(f"완료 ({len(df)}개)")
+            return df
+            
+        except Exception as e:
+            print(f"오류: {e}")
+            return pd.DataFrame()
     
     
     def calc_indicators(self, df):
@@ -106,52 +82,29 @@ class BTCReport:
         return df
     
     
-    def resample_to_4h(self, df):
-        """1시간 데이터를 4시간으로 리샘플링"""
-        if df.empty:
-            return df
-        
-        df_4h = df.resample('4H').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last',
-            'volume': 'sum'
-        }).dropna()
-        
-        return df_4h
-    
-    
-    def resample_to_daily(self, df):
-        """1시간 데이터를 1일로 리샘플링"""
-        if df.empty:
-            return df
-        
-        df_1d = df.resample('1D').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last',
-            'volume': 'sum'
-        }).dropna()
-        
-        return df_1d
-    
-    
     def analyze(self):
         """분석"""
-        # 데이터 수집 (90일치 시간봉)
-        df_hourly = self.fetch_coingecko_data(90)
+        # 데이터 수집
+        self.data['1h'] = self.fetch_data(period='90d', interval='1h')
         
-        if df_hourly.empty:
+        if self.data['1h'].empty:
             print("\n데이터 수집 실패")
-            self.log("❌ 데이터 수집 실패")
+            self.log("❌ 데이터 수집 실패 (Yahoo Finance)")
             return False
         
-        # 리샘플링
-        self.data['1h'] = df_hourly
-        self.data['4h'] = self.resample_to_4h(df_hourly)
-        self.data['1d'] = self.resample_to_daily(df_hourly)
+        # 4시간봉과 일봉
+        self.data['4h'] = self.fetch_data(period='60d', interval='1h')
+        if not self.data['4h'].empty:
+            # 4시간 리샘플링
+            self.data['4h'] = self.data['4h'].resample('4H').agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'volume': 'sum'
+            }).dropna()
+        
+        self.data['1d'] = self.fetch_data(period='2y', interval='1d')
         
         # 지표 계산
         for tf in ['1h', '4h', '1d']:
@@ -165,7 +118,7 @@ class BTCReport:
             
         current = self.data['1h']['close'].iloc[-1]
         prev_1h = self.data['1h']['close'].iloc[-2]
-        prev_24h = self.data['1h']['close'].iloc[-24]
+        prev_24h = self.data['1h']['close'].iloc[-24] if len(self.data['1h']) >= 24 else prev_1h
         
         change_1h = ((current / prev_1h - 1) * 100)
         change_24h = ((current / prev_24h - 1) * 100)
