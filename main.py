@@ -1,8 +1,8 @@
 """
 비트코인 시황 리포트 - 텔레그램 전송
+CoinGecko API 사용 (GitHub Actions 호환)
 """
 
-import ccxt
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -16,14 +16,6 @@ warnings.filterwarnings('ignore')
 class BTCReport:
     
     def __init__(self):
-        self.symbol = 'BTC/USDT'
-        self.exchange = ccxt.binance({
-            'enableRateLimit': True,
-            'timeout': 30000,
-            'options': {
-                'defaultType': 'spot'
-            }
-        })
         self.data = {}
         self.report = []
         
@@ -37,58 +29,56 @@ class BTCReport:
         print(text)
     
     
-    def fetch_data(self, timeframe, days, max_retries=3):
-        """데이터 수집"""
-        print(f"수집 중: {timeframe} ({days}일)...", end=" ")
+    def fetch_coingecko_data(self, days, max_retries=3):
+        """CoinGecko API로 데이터 수집"""
+        print(f"수집 중: {days}일 데이터...", end=" ")
         
-        since = self.exchange.parse8601(
-            (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d 00:00:00')
-        )
+        url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+        params = {
+            'vs_currency': 'usd',
+            'days': days,
+            'interval': 'hourly' if days <= 90 else 'daily'
+        }
         
-        all_data = []
-        retry_count = 0
-        
-        while retry_count < max_retries:
+        for attempt in range(max_retries):
             try:
-                ohlcv = self.exchange.fetch_ohlcv(self.symbol, timeframe, since, limit=1000)
+                response = requests.get(url, params=params, timeout=30)
                 
-                if not ohlcv:
-                    print(f"데이터 없음 (시도 {retry_count + 1}/{max_retries})")
-                    retry_count += 1
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # 데이터 변환
+                    prices = data['prices']
+                    volumes = data['total_volumes']
+                    
+                    df = pd.DataFrame(prices, columns=['timestamp', 'close'])
+                    df['volume'] = [v[1] for v in volumes]
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    df.set_index('timestamp', inplace=True)
+                    
+                    # OHLC 근사치 (1시간/1일 단위)
+                    df['open'] = df['close'].shift(1)
+                    df['high'] = df[['open', 'close']].max(axis=1)
+                    df['low'] = df[['open', 'close']].min(axis=1)
+                    df = df.dropna()
+                    
+                    print(f"완료 ({len(df)}개)")
+                    return df
+                else:
+                    print(f"오류 {response.status_code} (시도 {attempt + 1}/{max_retries})")
                     time.sleep(2)
-                    continue
-                
-                all_data.extend(ohlcv)
-                since = ohlcv[-1][0] + 1
-                
-                if since >= self.exchange.milliseconds():
-                    break
                     
             except Exception as e:
-                print(f"오류: {e} (시도 {retry_count + 1}/{max_retries})")
-                retry_count += 1
+                print(f"오류: {e} (시도 {attempt + 1}/{max_retries})")
                 time.sleep(2)
-                
-                if retry_count >= max_retries:
-                    print("최대 재시도 초과")
-                    break
-                continue
         
-        if not all_data:
-            print("실패 - 데이터 없음")
-            return pd.DataFrame()
-        
-        df = pd.DataFrame(all_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        
-        print(f"완료 ({len(df)}개)")
-        return df
+        print("실패")
+        return pd.DataFrame()
     
     
     def calc_indicators(self, df):
         """지표 계산"""
-        if df.empty:
+        if df.empty or len(df) < 100:
             return df
             
         df['MA7'] = df['close'].rolling(7).mean()
@@ -116,18 +106,52 @@ class BTCReport:
         return df
     
     
+    def resample_to_4h(self, df):
+        """1시간 데이터를 4시간으로 리샘플링"""
+        if df.empty:
+            return df
+        
+        df_4h = df.resample('4H').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna()
+        
+        return df_4h
+    
+    
+    def resample_to_daily(self, df):
+        """1시간 데이터를 1일로 리샘플링"""
+        if df.empty:
+            return df
+        
+        df_1d = df.resample('1D').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna()
+        
+        return df_1d
+    
+    
     def analyze(self):
         """분석"""
-        # 데이터 수집
-        self.data['1h'] = self.fetch_data('1h', 180)
+        # 데이터 수집 (90일치 시간봉)
+        df_hourly = self.fetch_coingecko_data(90)
         
-        if self.data['1h'].empty:
-            print("\n데이터 수집 실패 - 프로그램 종료")
+        if df_hourly.empty:
+            print("\n데이터 수집 실패")
             self.log("❌ 데이터 수집 실패")
             return False
         
-        self.data['4h'] = self.fetch_data('4h', 180)
-        self.data['1d'] = self.fetch_data('1d', 1095)
+        # 리샘플링
+        self.data['1h'] = df_hourly
+        self.data['4h'] = self.resample_to_4h(df_hourly)
+        self.data['1d'] = self.resample_to_daily(df_hourly)
         
         # 지표 계산
         for tf in ['1h', '4h', '1d']:
@@ -136,7 +160,7 @@ class BTCReport:
         
         # 현재가
         if len(self.data['1h']) < 24:
-            print("데이터 부족")
+            self.log("❌ 데이터 부족")
             return False
             
         current = self.data['1h']['close'].iloc[-1]
@@ -204,7 +228,7 @@ class BTCReport:
             self.log()
         
         if not scores:
-            self.log("분석 데이터 부족")
+            self.log("❌ 분석 데이터 부족")
             return False
         
         # 종합 의견
