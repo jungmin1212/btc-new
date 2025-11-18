@@ -28,7 +28,9 @@ jobs:
       
       # Python 패키지 설치
       - name: Install Python packages
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install TA-Lib
       
       # 스크립트 실행
       - name: Run report
