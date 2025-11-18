@@ -6,6 +6,7 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import talib
 from datetime import datetime, timedelta
 import warnings
 import requests
@@ -19,8 +20,8 @@ class BTCReport:
         self.data = {}
         self.report = []
         
-        self.TOKEN = os.getenv('TELEGRAM_TOKEN')
-        self.CHAT_ID = os.getenv('CHAT_ID')
+        self.TOKEN = "8055550685:AAFo5G8dJ7uBZTuSHmuKq58fGa3Mba5-gwA"
+        self.CHAT_ID = "7016339719"
     
     
     def log(self, text=''):
@@ -51,7 +52,7 @@ class BTCReport:
     
     
     def calc_indicators(self, df):
-        """기술적 지표 계산"""
+        """기술적 지표 계산 (TA-Lib 사용)"""
         if df.empty or len(df) < 100:
             return df
         
@@ -66,17 +67,19 @@ class BTCReport:
         df['EMA12'] = df['close'].ewm(span=12).mean()
         df['EMA26'] = df['close'].ewm(span=26).mean()
         
-        # RSI
-        delta = df['close'].diff()
-        gain = delta.where(delta > 0, 0).rolling(14).mean()
-        loss = -delta.where(delta < 0, 0).rolling(14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
+        # RSI (TA-Lib - Wilder's smoothing)
+        df['RSI'] = talib.RSI(df['close'], timeperiod=14)
         
-        # MACD
-        df['MACD'] = df['EMA12'] - df['EMA26']
-        df['MACD_signal'] = df['MACD'].ewm(span=9).mean()
-        df['MACD_hist'] = df['MACD'] - df['MACD_signal']
+        # MACD (TA-Lib)
+        macd, signal, hist = talib.MACD(
+            df['close'],
+            fastperiod=12,
+            slowperiod=26,
+            signalperiod=9
+        )
+        df['MACD'] = macd
+        df['MACD_signal'] = signal
+        df['MACD_hist'] = hist
         
         # 볼린저 밴드
         df['BB_mid'] = df['close'].rolling(20).mean()
@@ -282,9 +285,9 @@ class BTCReport:
         current_dd = drawdown.iloc[-1]
         
         # 리포트 시작
-        self.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        self.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         self.log("<b>📈 비트코인 정밀 시황 리포트</b>")
-        self.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        self.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         self.log(f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         self.log(f"<b>💰 현재가: ${current:,.0f}</b>")
         self.log(f"📊 1시간: {change_1h:+.2f}% | 24시간: {change_24h:+.2f}%")
@@ -316,9 +319,9 @@ class BTCReport:
             self.log()
         
         # 종합 의견
-        self.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        self.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         self.log("<b>💡 종합 의견 및 전략</b>")
-        self.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        self.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         
         # 타임프레임별 상황 파악
         a1h = analysis.get('1h')
@@ -341,7 +344,7 @@ class BTCReport:
         else:
             # 타임프레임 괴리
             if a1d['trend'] in ['완벽한 역배열', '역배열']:
-                self.log(f"⚠️  <b>장기 하락세 지속</b> (일봉 {a1d['trend']})")
+                self.log(f"⚠️ <b>장기 하락세 지속</b> (일봉 {a1d['trend']})")
                 if a1h['rsi'] > 50 or a4h['rsi'] > 50:
                     self.log(f"   단기 반등 시도 중 (1H RSI {a1h['rsi']:.0f} / 4H RSI {a4h['rsi']:.0f})")
                     self.log(f"   주의: 반등은 기술적 반등일 가능성. 추세 전환 아님.")
@@ -378,7 +381,7 @@ class BTCReport:
             else:
                 self.log(f"   4시간 RSI 아직 약세 → 반등 확인 필요")
         elif a1d['rsi'] > 70:
-            self.log(f"⚠️  <b>일봉 과매수</b> → 조정 가능성 높음")
+            self.log(f"⚠️ <b>일봉 과매수</b> → 조정 가능성 높음")
             if a4h['rsi'] < 50:
                 self.log(f"   4시간 RSI 하락 → 조정 시작 신호")
         
@@ -433,12 +436,12 @@ class BTCReport:
         
         if risks:
             for r in risks:
-                self.log(f"⚠️  {r}")
+                self.log(f"⚠️ {r}")
         else:
             self.log("특이사항 없음")
         
         self.log()
-        self.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        self.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         
         return True
     
