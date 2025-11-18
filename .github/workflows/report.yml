@@ -2,7 +2,8 @@ name: BTC Report
 
 on:
   schedule:
-    - cron: '0 */4 * * *'
+    # 한국 시간 9시부터 4시간마다: 9시, 13시, 17시, 21시, 1시, 5시
+    - cron: '0 0,4,8,12,16,20 * * *'
   workflow_dispatch:
 
 jobs:
